@@ -15,12 +15,10 @@ import (
 	"golang.org/x/sys/unix"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -35,40 +33,28 @@ type (
 
 // +kubebuilder:webhook:path=/validate-ingressnodefirewall-openshift-io-v1alpha1-ingressnodefirewall,mutating=false,failurePolicy=fail,sideEffects=None,groups=ingressnodefirewall.openshift.io,resources=ingressnodefirewalls,verbs=create;update,versions=v1alpha1,name=vingressnodefirewall.kb.io,admissionReviewVersions=v1
 var (
-	_          webhook.CustomValidator = &IngressNodeFirewallWebhook{ingressnodefwv1alpha1.IngressNodeFirewall{}}
 	kubeClient client.Client
 )
 
 func (r *IngressNodeFirewallWebhook) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	kubeClient = mgr.GetClient()
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&ingressnodefwv1alpha1.IngressNodeFirewall{}).
+	return ctrl.NewWebhookManagedBy[*ingressnodefwv1alpha1.IngressNodeFirewall](mgr, &ingressnodefwv1alpha1.IngressNodeFirewall{}).
 		WithValidator(&IngressNodeFirewallWebhook{}).
 		Complete()
 }
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *IngressNodeFirewallWebhook) ValidateCreate(ctx context.Context, newObj runtime.Object) (warnings admission.Warnings, err error) {
-	newINF, ok := newObj.(*ingressnodefwv1alpha1.IngressNodeFirewall)
-	if !ok {
-		return nil, apierrors.NewBadRequest(fmt.Sprintf("expected an IngressNodeFirewall but got a %T", newObj))
-	}
-
-	return nil, validateIngressNodeFirewall(ctx, newINF, kubeClient)
+func (r *IngressNodeFirewallWebhook) ValidateCreate(ctx context.Context, newObj *ingressnodefwv1alpha1.IngressNodeFirewall) (warnings admission.Warnings, err error) {
+	return nil, validateIngressNodeFirewall(ctx, newObj, kubeClient)
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *IngressNodeFirewallWebhook) ValidateUpdate(ctx context.Context, _, newObj runtime.Object) (warnings admission.Warnings, err error) {
-	newINF, ok := newObj.(*ingressnodefwv1alpha1.IngressNodeFirewall)
-	if !ok {
-		return nil, apierrors.NewBadRequest(fmt.Sprintf("expected an IngressNodeFirewall but got a %T", newObj))
-	}
-
-	return nil, validateIngressNodeFirewall(ctx, newINF, kubeClient)
+func (r *IngressNodeFirewallWebhook) ValidateUpdate(ctx context.Context, _ *ingressnodefwv1alpha1.IngressNodeFirewall, newObj *ingressnodefwv1alpha1.IngressNodeFirewall) (warnings admission.Warnings, err error) {
+	return nil, validateIngressNodeFirewall(ctx, newObj, kubeClient)
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *IngressNodeFirewallWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (warnings admission.Warnings, err error) {
+func (r *IngressNodeFirewallWebhook) ValidateDelete(_ context.Context, _ *ingressnodefwv1alpha1.IngressNodeFirewall) (warnings admission.Warnings, err error) {
 	return nil, nil
 }
 
