@@ -17,10 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
 
+	"github.com/go-logr/logr"
 	ingressnodefwv1alpha1 "github.com/openshift/ingress-node-firewall/api/v1alpha1"
 	"github.com/openshift/ingress-node-firewall/controllers"
 	"github.com/openshift/ingress-node-firewall/pkg/platform"
@@ -30,11 +32,14 @@ import (
 	//+kubebuilder:scaffold:imports
 
 	bpfmaniov1alpha1 "github.com/bpfman/bpfman-operator/apis/v1alpha1"
+	configv1 "github.com/openshift/api/config/v1"
+	inftls "github.com/openshift/ingress-node-firewall/pkg/tls"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -50,6 +55,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(ingressnodefwv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(bpfmaniov1alpha1.Install(scheme))
+	utilruntime.Must(configv1.Install(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -79,11 +85,21 @@ func main() {
 
 	setupLog.Info("Version", "version.Version", version.Version)
 
-	disableHTTP2 := func(c *tls.Config) {
-		if enableHTTP2 {
-			return
-		}
-		c.NextProtos = []string{"http/1.1"}
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
+	defer cancel()
+
+	cfg := ctrl.GetConfigOrDie()
+
+	tlsProfileClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create client")
+		os.Exit(1)
+	}
+
+	tlsProfile, err := inftls.GetProfileInfo(logr.NewContext(ctx, setupLog), tlsProfileClient)
+	if err != nil {
+		setupLog.Error(err, "unable to get TLS profile options")
+		os.Exit(1)
 	}
 
 	if _, ok := os.LookupEnv("DAEMONSET_IMAGE"); !ok {
@@ -100,16 +116,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	tlsOpts := append(tlsProfile.TLSOpts, func(c *tls.Config) {
+		if enableHTTP2 {
+			return
+		}
+		c.NextProtos = []string{"http/1.1"}
+	})
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress:   metricsAddr,
 			SecureServing: secureMetrics,
-			TLSOpts:       []func(*tls.Config){disableHTTP2},
+			TLSOpts:       tlsOpts,
 		},
 		WebhookServer: webhookctrl.NewServer(webhookctrl.Options{
 			Port:    9443,
-			TLSOpts: []func(config *tls.Config){disableHTTP2},
+			TLSOpts: tlsOpts,
 		}),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
@@ -148,7 +171,6 @@ func main() {
 		}
 	}
 
-	cfg := ctrl.GetConfigOrDie()
 	platformInfo, err := platform.GetPlatformInfo(cfg)
 	if err != nil {
 		setupLog.Error(err, "unable to get platform name")
@@ -160,6 +182,9 @@ func main() {
 		Log:          ctrl.Log.WithName("controllers").WithName("IngressNodeFirewallConfig"),
 		Namespace:    nameSpace,
 		PlatformInfo: platformInfo,
+		GetTLSProfileSpec: func() *configv1.TLSProfileSpec {
+			return tlsProfile.ProfileSpec
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IngressNodeFirewallConfig")
 		os.Exit(1)
@@ -175,8 +200,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := inftls.WatchProfile(ctx, tlsProfile, mgr, cancel); err != nil {
+		setupLog.Error(err, "unable to set up TLS profile watch")
+		os.Exit(1)
+	}
+
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
