@@ -86,8 +86,16 @@ spec:
                 sleep 5
               done
               echo $(date -Iseconds) INFO: ingress-node-firewall-daemon-metrics-certs mounted, starting kube-rbac-proxy
-              exec /usr/bin/kube-rbac-proxy --secure-listen-address=:9301 \
+              exec /usr/bin/kube-rbac-proxy \
+                --secure-listen-address=:9301 \
+              {{- if .TLSMinVersion }}
+                --tls-min-version={{.TLSMinVersion}} \
+              {{- end }}
+              {{- if .TLSCipherSuites }}
+                --tls-cipher-suites={{.TLSCipherSuites}} \
+              {{- else }}
                 --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_RSA_WITH_AES_128_CBC_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 \
+              {{- end }}
                 --upstream=http://127.0.0.1:39401 \
                 --tls-private-key-file=${TLS_PK} \
                 --tls-cert-file=${TLS_CERT}

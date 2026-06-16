@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	//+kubebuilder:scaffold:imports
@@ -28,6 +29,7 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	configv1 "github.com/openshift/api/config/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,6 +56,7 @@ const (
 var cfg *rest.Config
 var k8sClient client.Client
 var testEnv *envtest.Environment
+var tlsProfileSpec atomic.Value // holds *configv1.TLSProfileSpec
 
 func TestAPIs(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -110,6 +113,13 @@ var _ = BeforeSuite(func() {
 		Scheme:    scheme.Scheme,
 		Log:       ctrl.Log.WithName("controllers").WithName("IngressNodeFirewallConfig"),
 		Namespace: IngressNodeFwConfigTestNameSpace,
+		GetTLSProfileSpec: func() *configv1.TLSProfileSpec {
+			val := tlsProfileSpec.Load()
+			if val == nil {
+				return nil
+			}
+			return val.(*configv1.TLSProfileSpec)
+		},
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
