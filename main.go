@@ -14,6 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// +kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch
+
 package main
 
 import (
@@ -42,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookctrl "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
@@ -66,14 +71,16 @@ func main() {
 	var probeAddr string
 	var enableHTTP2 bool
 	var secureMetrics bool
+	var metricsCertDir string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":39201", "The address the metric endpoint binds to.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9300", "The address the metric endpoint binds to.")
+	flag.StringVar(&metricsCertDir, "metrics-cert-dir", "/etc/pki/tls/metrics-certs", "Directory containing TLS certificates for metrics endpoint.")
 	flag.BoolVar(&enableWebhook, "enable-webhook", false, "Enable deployment of webhook to validate CR IngressNodeFirewall")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", enableHTTP2, "If HTTP/2 should be enabled for the metrics and webhook servers.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", secureMetrics, "If the metrics endpoint should be served securely.")
+	flag.BoolVar(&secureMetrics, "metrics-secure", true, "If the metrics endpoint should be served securely.")
 
 	opts := zap.Options{
 		Development: true,
@@ -126,9 +133,11 @@ func main() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
-			BindAddress:   metricsAddr,
-			SecureServing: secureMetrics,
-			TLSOpts:       tlsOpts,
+			BindAddress:    metricsAddr,
+			SecureServing:  secureMetrics,
+			CertDir:        metricsCertDir,
+			FilterProvider: filters.WithAuthenticationAndAuthorization,
+			TLSOpts:        tlsOpts,
 		},
 		WebhookServer: webhookctrl.NewServer(webhookctrl.Options{
 			Port:    9443,
