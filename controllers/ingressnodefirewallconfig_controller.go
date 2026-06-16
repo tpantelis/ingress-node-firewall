@@ -27,6 +27,7 @@ import (
 	"github.com/openshift/ingress-node-firewall/pkg/platform"
 	"github.com/openshift/ingress-node-firewall/pkg/render"
 	"github.com/openshift/ingress-node-firewall/pkg/status"
+	inftls "github.com/openshift/ingress-node-firewall/pkg/tls"
 
 	"github.com/go-logr/logr"
 	configv1 "github.com/openshift/api/config/v1"
@@ -168,7 +169,7 @@ func (r *IngressNodeFirewallConfigReconciler) syncIngressNodeFwConfigResources(c
 	tlsProfileSpec := r.GetTLSProfileSpec()
 	if tlsProfileSpec != nil {
 		data.Data["TLSMinVersion"] = string(tlsProfileSpec.MinTLSVersion)
-		data.Data["TLSCipherSuites"] = strings.Join(tlsProfileSpec.Ciphers, ",")
+		data.Data["TLSCipherSuites"] = strings.Join(inftls.ConvertCiphersToIANA(tlsProfileSpec.Ciphers), ",")
 	} else {
 		data.Data["TLSMinVersion"] = ""
 		data.Data["TLSCipherSuites"] = ""
