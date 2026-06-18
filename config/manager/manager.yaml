@@ -58,39 +58,11 @@ spec:
             cpu: 10m
             memory: 64Mi
       - name: kube-rbac-proxy
-        image: quay.io/openshift/origin-kube-rbac-proxy:latest
-        command:
-          - /bin/bash
-          - -c
-          - |
-            #!/bin/bash
-            set -euo pipefail
-            TLS_PK=/etc/pki/tls/metrics-certs/tls.key
-            TLS_CERT=/etc/pki/tls/metrics-certs/tls.crt
-            # As the secret mount is optional we must wait for the files to be present.
-            # If it isn't created there is probably an issue so we want to crashloop.
-            TS=$(date +%s)
-            WARN_TS=$(( ${TS} + $(( 20 * 60)) ))
-            HAS_LOGGED_INFO=0
-            log_missing_certs(){
-                CUR_TS=$(date +%s)
-                if [[ "${CUR_TS}" -gt "${WARN_TS}"  ]]; then
-                  echo $(date -Iseconds) WARN: ingress-node-firewall-controller-manager-metrics-certs not mounted after 20 minutes.
-                elif [[ "${HAS_LOGGED_INFO}" -eq 0 ]] ; then
-                  echo $(date -Iseconds) INFO: ingress-node-firewall-controller-manager-metrics-certs not mounted. Waiting 20 minutes.
-                  HAS_LOGGED_INFO=1
-                fi
-            }
-            while [[ ! -f "${TLS_PK}" ||  ! -f "${TLS_CERT}" ]] ; do
-              log_missing_certs
-              sleep 5
-            done
-            echo $(date -Iseconds) INFO: ingress-node-firewall-controller-manager-metrics-certs mounted, starting kube-rbac-proxy
-            exec /usr/bin/kube-rbac-proxy --secure-listen-address=:9300 \
-              --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_RSA_WITH_AES_128_CBC_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 \
-              --upstream=http://127.0.0.1:39400 \
-              --tls-private-key-file=${TLS_PK} \
-              --tls-cert-file=${TLS_CERT}
+        image: controller:latest
+        args:
+          - --run-kube-rbac-proxy
+          - --metrics-bind-address=127.0.0.1:39400
+          - --secret-name=ingress-node-firewall-controller-manager-metrics-certs
         ports:
           - containerPort: 9300
             name: https

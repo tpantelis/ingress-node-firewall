@@ -1,3 +1,6 @@
+# Get kube-rbac-proxy binary
+FROM registry.ci.openshift.org/ocp/4.22:kube-rbac-proxy AS kube-rbac-proxy
+
 # Build the manager binary
 FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.25-openshift-4.22 AS builder
 
@@ -22,5 +25,6 @@ FROM registry.ci.openshift.org/ocp/4.22:base-rhel9
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/bindata/manifests /bindata/manifests
+COPY --from=kube-rbac-proxy /usr/bin/kube-rbac-proxy /usr/bin/kube-rbac-proxy
 
 ENTRYPOINT ["/manager"]

@@ -1,3 +1,6 @@
+# Get kube-rbac-proxy binary
+FROM quay.io/openshift/origin-kube-rbac-proxy:latest AS kube-rbac-proxy
+
 # Build the manager binary
 FROM golang:1.25 as builder
 
@@ -25,6 +28,7 @@ FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/bindata/manifests /bindata/manifests
+COPY --from=kube-rbac-proxy /usr/bin/kube-rbac-proxy /usr/bin/kube-rbac-proxy
 
 USER nonroot:nonroot
 
