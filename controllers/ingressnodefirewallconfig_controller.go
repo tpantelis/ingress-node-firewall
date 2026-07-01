@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"os"
+	"strings"
 	"time"
 
 	ingressnodefwv1alpha1 "github.com/openshift/ingress-node-firewall/api/v1alpha1"
@@ -26,8 +27,10 @@ import (
 	"github.com/openshift/ingress-node-firewall/pkg/platform"
 	"github.com/openshift/ingress-node-firewall/pkg/render"
 	"github.com/openshift/ingress-node-firewall/pkg/status"
+	inftls "github.com/openshift/ingress-node-firewall/pkg/tls"
 
 	"github.com/go-logr/logr"
+	configv1 "github.com/openshift/api/config/v1"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -54,10 +57,11 @@ var ManifestPath = IngressNodeFirewallManifestPath
 // IngressNodeFirewallConfigReconciler reconciles a IngressNodeFirewallConfig object
 type IngressNodeFirewallConfigReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	Log          logr.Logger
-	Namespace    string
-	PlatformInfo platform.PlatformInfo
+	Scheme            *runtime.Scheme
+	Log               logr.Logger
+	Namespace         string
+	PlatformInfo      platform.PlatformInfo
+	GetTLSProfileSpec func() *configv1.TLSProfileSpec
 }
 
 // +kubebuilder:rbac:groups=apps,namespace=ingress-node-firewall-system,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
@@ -158,6 +162,17 @@ func (r *IngressNodeFirewallConfigReconciler) syncIngressNodeFwConfigResources(c
 			data.Data["EBPFProgramManagerMode"] = "1"
 			useBPFMan = true
 		}
+	}
+
+	// Add TLS configuration for kube-rbac-proxy
+	// Always set these keys (even if empty) so the template doesn't error on missing keys
+	tlsProfileSpec := r.GetTLSProfileSpec()
+	if tlsProfileSpec != nil {
+		data.Data["TLSMinVersion"] = string(tlsProfileSpec.MinTLSVersion)
+		data.Data["TLSCipherSuites"] = strings.Join(inftls.ConvertCiphersToIANA(tlsProfileSpec.Ciphers), ",")
+	} else {
+		data.Data["TLSMinVersion"] = ""
+		data.Data["TLSCipherSuites"] = ""
 	}
 
 	objs, err := render.RenderDir(ManifestPath, &data)

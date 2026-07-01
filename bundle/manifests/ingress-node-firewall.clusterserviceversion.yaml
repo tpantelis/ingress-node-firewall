@@ -87,11 +87,11 @@ metadata:
     categories: Networking
     certified: "false"
     containerImage: quay.io/openshift/origin-ingress-node-firewall:latest
-    createdAt: "2025-09-04T08:08:17Z"
+    createdAt: "2026-06-24T21:29:30Z"
     features.operators.openshift.io/disconnected: "true"
     features.operators.openshift.io/fips-compliant: "true"
     features.operators.openshift.io/proxy-aware: "false"
-    features.operators.openshift.io/tls-profiles: "false"
+    features.operators.openshift.io/tls-profiles: "true"
     features.operators.openshift.io/token-auth-aws: "false"
     features.operators.openshift.io/token-auth-azure: "false"
     features.operators.openshift.io/token-auth-gcp: "false"
@@ -152,6 +152,18 @@ spec:
           - update
           - watch
         - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
+        - apiGroups:
           - bpfman.io
           resources:
           - bpfapplications
@@ -164,46 +176,18 @@ spec:
           - update
           - watch
         - apiGroups:
+          - config.openshift.io
+          resources:
+          - apiservers
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
           - ingressnodefirewall.openshift.io
           resources:
           - ingressnodefirewallconfigs
-          verbs:
-          - create
-          - delete
-          - get
-          - list
-          - patch
-          - update
-          - watch
-        - apiGroups:
-          - ingressnodefirewall.openshift.io
-          resources:
-          - ingressnodefirewallconfigs/finalizers
-          verbs:
-          - update
-        - apiGroups:
-          - ingressnodefirewall.openshift.io
-          resources:
-          - ingressnodefirewallconfigs/status
-          verbs:
-          - get
-          - patch
-          - update
-        - apiGroups:
-          - ingressnodefirewall.openshift.io
-          resources:
           - ingressnodefirewallnodestates
-          verbs:
-          - create
-          - delete
-          - get
-          - list
-          - patch
-          - update
-          - watch
-        - apiGroups:
-          - ingressnodefirewall.openshift.io
-          resources:
           - ingressnodefirewalls
           verbs:
           - create
@@ -216,12 +200,14 @@ spec:
         - apiGroups:
           - ingressnodefirewall.openshift.io
           resources:
+          - ingressnodefirewallconfigs/finalizers
           - ingressnodefirewalls/finalizers
           verbs:
           - update
         - apiGroups:
           - ingressnodefirewall.openshift.io
           resources:
+          - ingressnodefirewallconfigs/status
           - ingressnodefirewalls/status
           verbs:
           - get
@@ -260,7 +246,8 @@ spec:
               containers:
               - args:
                 - --health-probe-bind-address=:8081
-                - --metrics-bind-address=127.0.0.1:39400
+                - --metrics-bind-address=:9300
+                - --metrics-cert-dir=/etc/pki/tls/metrics-certs
                 - --leader-elect
                 - --enable-webhook
                 command:
@@ -286,6 +273,9 @@ spec:
                 - containerPort: 9443
                   name: webhook-server
                   protocol: TCP
+                - containerPort: 9300
+                  name: https
+                  protocol: TCP
                 readinessProbe:
                   httpGet:
                     path: /readyz
@@ -299,53 +289,11 @@ spec:
                   requests:
                     cpu: 10m
                     memory: 64Mi
+                terminationMessagePolicy: FallbackToLogsOnError
                 volumeMounts:
                 - mountPath: /tmp/k8s-webhook-server/serving-certs
                   name: cert
                   readOnly: true
-              - command:
-                - /bin/bash
-                - -c
-                - |
-                  #!/bin/bash
-                  set -euo pipefail
-                  TLS_PK=/etc/pki/tls/metrics-certs/tls.key
-                  TLS_CERT=/etc/pki/tls/metrics-certs/tls.crt
-                  # As the secret mount is optional we must wait for the files to be present.
-                  # If it isn't created there is probably an issue so we want to crashloop.
-                  TS=$(date +%s)
-                  WARN_TS=$(( ${TS} + $(( 20 * 60)) ))
-                  HAS_LOGGED_INFO=0
-                  log_missing_certs(){
-                      CUR_TS=$(date +%s)
-                      if [[ "${CUR_TS}" -gt "${WARN_TS}"  ]]; then
-                        echo $(date -Iseconds) WARN: ingress-node-firewall-controller-manager-metrics-certs not mounted after 20 minutes.
-                      elif [[ "${HAS_LOGGED_INFO}" -eq 0 ]] ; then
-                        echo $(date -Iseconds) INFO: ingress-node-firewall-controller-manager-metrics-certs not mounted. Waiting 20 minutes.
-                        HAS_LOGGED_INFO=1
-                      fi
-                  }
-                  while [[ ! -f "${TLS_PK}" ||  ! -f "${TLS_CERT}" ]] ; do
-                    log_missing_certs
-                    sleep 5
-                  done
-                  echo $(date -Iseconds) INFO: ingress-node-firewall-controller-manager-metrics-certs mounted, starting kube-rbac-proxy
-                  exec /usr/bin/kube-rbac-proxy --secure-listen-address=:9300 \
-                    --tls-cipher-suites=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_RSA_WITH_AES_128_CBC_SHA256,TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 \
-                    --upstream=http://127.0.0.1:39400 \
-                    --tls-private-key-file=${TLS_PK} \
-                    --tls-cert-file=${TLS_CERT}
-                image: quay.io/openshift/origin-kube-rbac-proxy:latest
-                name: kube-rbac-proxy
-                ports:
-                - containerPort: 9300
-                  name: https
-                resources:
-                  requests:
-                    cpu: 10m
-                    memory: 20Mi
-                terminationMessagePolicy: FallbackToLogsOnError
-                volumeMounts:
                 - mountPath: /etc/pki/tls/metrics-certs
                   name: ingress-node-firewall-controller-manager-metrics-certs
                   readOnly: true
@@ -360,7 +308,7 @@ spec:
                   secretName: webhook-server-cert
               - name: ingress-node-firewall-controller-manager-metrics-certs
                 secret:
-                  optional: true
+                  optional: false
                   secretName: ingress-node-firewall-controller-manager-metrics-certs
       permissions:
       - rules:

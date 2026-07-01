@@ -14,13 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+// +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// +kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch
+
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
 
+	"github.com/go-logr/logr"
 	ingressnodefwv1alpha1 "github.com/openshift/ingress-node-firewall/api/v1alpha1"
 	"github.com/openshift/ingress-node-firewall/controllers"
 	"github.com/openshift/ingress-node-firewall/pkg/platform"
@@ -30,13 +36,17 @@ import (
 	//+kubebuilder:scaffold:imports
 
 	bpfmaniov1alpha1 "github.com/bpfman/bpfman-operator/apis/v1alpha1"
+	configv1 "github.com/openshift/api/config/v1"
+	inftls "github.com/openshift/ingress-node-firewall/pkg/tls"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	webhookctrl "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
@@ -50,6 +60,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(ingressnodefwv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(bpfmaniov1alpha1.Install(scheme))
+	utilruntime.Must(configv1.Install(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -60,14 +71,16 @@ func main() {
 	var probeAddr string
 	var enableHTTP2 bool
 	var secureMetrics bool
+	var metricsCertDir string
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":39201", "The address the metric endpoint binds to.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9300", "The address the metric endpoint binds to.")
+	flag.StringVar(&metricsCertDir, "metrics-cert-dir", "/etc/pki/tls/metrics-certs", "Directory containing TLS certificates for metrics endpoint.")
 	flag.BoolVar(&enableWebhook, "enable-webhook", false, "Enable deployment of webhook to validate CR IngressNodeFirewall")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", enableHTTP2, "If HTTP/2 should be enabled for the metrics and webhook servers.")
-	flag.BoolVar(&secureMetrics, "metrics-secure", secureMetrics, "If the metrics endpoint should be served securely.")
+	flag.BoolVar(&secureMetrics, "metrics-secure", true, "If the metrics endpoint should be served securely.")
 
 	opts := zap.Options{
 		Development: true,
@@ -79,11 +92,21 @@ func main() {
 
 	setupLog.Info("Version", "version.Version", version.Version)
 
-	disableHTTP2 := func(c *tls.Config) {
-		if enableHTTP2 {
-			return
-		}
-		c.NextProtos = []string{"http/1.1"}
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
+	defer cancel()
+
+	cfg := ctrl.GetConfigOrDie()
+
+	tlsProfileClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create client")
+		os.Exit(1)
+	}
+
+	tlsProfile, err := inftls.GetProfileInfo(logr.NewContext(ctx, setupLog), tlsProfileClient)
+	if err != nil {
+		setupLog.Error(err, "unable to get TLS profile options")
+		os.Exit(1)
 	}
 
 	if _, ok := os.LookupEnv("DAEMONSET_IMAGE"); !ok {
@@ -100,16 +123,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	tlsOpts := append(tlsProfile.TLSOpts, func(c *tls.Config) {
+		if enableHTTP2 {
+			return
+		}
+		c.NextProtos = []string{"http/1.1"}
+	})
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
-			BindAddress:   metricsAddr,
-			SecureServing: secureMetrics,
-			TLSOpts:       []func(*tls.Config){disableHTTP2},
+			BindAddress:    metricsAddr,
+			SecureServing:  secureMetrics,
+			CertDir:        metricsCertDir,
+			FilterProvider: filters.WithAuthenticationAndAuthorization,
+			TLSOpts:        tlsOpts,
 		},
 		WebhookServer: webhookctrl.NewServer(webhookctrl.Options{
 			Port:    9443,
-			TLSOpts: []func(config *tls.Config){disableHTTP2},
+			TLSOpts: tlsOpts,
 		}),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
@@ -148,18 +180,18 @@ func main() {
 		}
 	}
 
-	cfg := ctrl.GetConfigOrDie()
 	platformInfo, err := platform.GetPlatformInfo(cfg)
 	if err != nil {
 		setupLog.Error(err, "unable to get platform name")
 		os.Exit(1)
 	}
 	if err = (&controllers.IngressNodeFirewallConfigReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Log:          ctrl.Log.WithName("controllers").WithName("IngressNodeFirewallConfig"),
-		Namespace:    nameSpace,
-		PlatformInfo: platformInfo,
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Log:               ctrl.Log.WithName("controllers").WithName("IngressNodeFirewallConfig"),
+		Namespace:         nameSpace,
+		PlatformInfo:      platformInfo,
+		GetTLSProfileSpec: tlsProfile.GetProfileSpec,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IngressNodeFirewallConfig")
 		os.Exit(1)
@@ -175,8 +207,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := tlsProfile.SetupProfileWatch(logr.NewContext(ctx, setupLog), mgr, cancel); err != nil {
+		setupLog.Error(err, "unable to set up TLS profile watch")
+		os.Exit(1)
+	}
+
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
