@@ -1342,48 +1342,32 @@ var _ = Describe("Ingress Node Firewall", func() {
 		})
 
 		It("should verify TLS group preferences compliance with restricted groups (secp521r1, secp256r1)", func() {
-			groups := []string{"secp521r1", "secp256r1"}
+			ctx := context.TODO()
+
+			groups := []configv1.TLSGroup{configv1.TLSGroupSecP521r1, configv1.TLSGroupSecP256r1}
 
 			By("Enabling TLSGroupPreferences feature gate")
 			_, err := tls.EnableTLSGroupPreferencesFeatureGate(testclient.Client)
 			Expect(err).NotTo(HaveOccurred(), "Failed to enable TLSGroupPreferences feature gate")
 
-			// Check if EXACT groups are already configured (not more, not less)
-			By("Checking if exact TLS groups are already configured")
-			exactGroupsConfigured := false
-			err = tls.VerifyAPIServerTLSGroups(testclient.Client, groups)
-			if err == nil {
-				log.Println("Exact TLS groups [secp521r1, secp256r1] are already configured")
-				exactGroupsConfigured = true
-			} else {
-				log.Printf("TLS groups need configuration: %v", err)
-			}
+			By("Configuring APIServer with custom TLS profile and groups")
+			updated, err := tls.ConfigureAPIServerWithTLSGroups(ctx, testclient.Client, groups)
+			Expect(err).NotTo(HaveOccurred(), "Failed to configure APIServer with TLS groups")
 
-			if !exactGroupsConfigured {
-				By("Configuring APIServer with custom TLS profile and groups")
-				err = tls.ConfigureAPIServerWithTLSGroups(testclient.Client, groups, configv1.VersionTLS12, nil)
-				Expect(err).NotTo(HaveOccurred(), "Failed to configure APIServer with TLS groups")
-
-				By("Verifying TLS groups configuration in APIServer")
-				err = tls.VerifyAPIServerTLSGroups(testclient.Client, groups)
-				Expect(err).NotTo(HaveOccurred(), "Failed to verify TLS groups configuration")
-
+			if updated {
 				By("Restarting daemon pods to pick up new TLS configuration")
-				infDaemonSet := &appsv1.DaemonSet{}
-				infDaemonSet.SetName("ingress-node-firewall-daemon")
-				infDaemonSet.SetNamespace(OperatorNameSpace)
 				err = tls.RestartDaemonPods(testclient.Client, OperatorNameSpace, "app=ingress-node-firewall-daemon")
 				Expect(err).ShouldNot(HaveOccurred())
-				err = daemonset.WaitForDaemonSetReady(testclient.Client, infDaemonSet, retryInterval, timeout)
-				Expect(err).ShouldNot(HaveOccurred())
-			} else {
-				By("Skipped - exact groups already configured, verifying daemon is ready")
-				infDaemonSet := &appsv1.DaemonSet{}
-				infDaemonSet.SetName("ingress-node-firewall-daemon")
-				infDaemonSet.SetNamespace(OperatorNameSpace)
-				err = daemonset.WaitForDaemonSetReady(testclient.Client, infDaemonSet, retryInterval, timeout)
-				Expect(err).ShouldNot(HaveOccurred())
 			}
+
+			By("Verifying daemon is ready")
+			err = daemonset.WaitForDaemonSetReady(testclient.Client, &appsv1.DaemonSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ingress-node-firewall-daemon",
+					Namespace: OperatorNameSpace,
+				},
+			}, retryInterval, timeout)
+			Expect(err).ShouldNot(HaveOccurred())
 
 			By("Testing TLS handshakes on worker node")
 			err = tls.VerifyTLSGroupsOnWorkerNode(testclient.Client, OperatorNameSpace)

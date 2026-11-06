@@ -11,7 +11,6 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	mcfgv1 "github.com/openshift/api/machineconfiguration/v1"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -446,45 +445,40 @@ func EnableTLSGroupPreferencesFeatureGate(c *testclient.ClientSet) (bool, error)
 }
 
 // ConfigureAPIServerWithTLSGroups configures the APIServer with custom TLS profile including groups and waits for cluster stabilization.
-func ConfigureAPIServerWithTLSGroups(c *testclient.ClientSet, groups []string, minTLSVersion configv1.TLSProtocolVersion, ciphers []string) error {
-	ctx := context.Background()
-
-	log.Printf("Configuring APIServer with TLS groups: %v", groups)
+func ConfigureAPIServerWithTLSGroups(ctx context.Context, c *testclient.ClientSet, tlsGroups []configv1.TLSGroup) (bool, error) {
+	log.Printf("Configuring APIServer with TLS groups: %v", tlsGroups)
 
 	apiserver := &configv1.APIServer{}
 	err := c.Get(ctx, types.NamespacedName{Name: "cluster"}, apiserver)
 	if err != nil {
-		return fmt.Errorf("failed to get apiserver: %w", err)
+		return false, fmt.Errorf("failed to get apiserver: %w", err)
 	}
 
-	// Convert string groups to TLSGroup type
-	tlsGroups := make([]configv1.TLSGroup, len(groups))
-	for i, g := range groups {
-		tlsGroups[i] = configv1.TLSGroup(g)
+	if apiserver.Spec.TLSSecurityProfile != nil && apiserver.Spec.TLSSecurityProfile.Type == configv1.TLSProfileCustomType &&
+		apiserver.Spec.TLSSecurityProfile.Custom != nil && slices.Equal(apiserver.Spec.TLSSecurityProfile.Custom.Groups, tlsGroups) &&
+		apiserver.Spec.TLSAdherence == configv1.TLSAdherencePolicyStrictAllComponents {
+		return false, nil
 	}
 
 	// If no ciphers specified, use a default set that satisfies OpenShift requirements
 	// OpenShift requires at least one HTTP/2-compatible cipher (AES_128_GCM_SHA256)
-	if ciphers == nil || len(ciphers) == 0 {
-		ciphers = []string{
-			"TLS_AES_128_GCM_SHA256",
-			"TLS_AES_256_GCM_SHA384",
-			"TLS_CHACHA20_POLY1305_SHA256",
-			"ECDHE-ECDSA-AES128-GCM-SHA256",
-			"ECDHE-RSA-AES128-GCM-SHA256",
-			"ECDHE-ECDSA-AES256-GCM-SHA384",
-			"ECDHE-RSA-AES256-GCM-SHA384",
-		}
-		log.Printf("  No ciphers specified, using default cipher suite")
+	ciphers := []string{
+		"TLS_AES_128_GCM_SHA256",
+		"TLS_AES_256_GCM_SHA384",
+		"TLS_CHACHA20_POLY1305_SHA256",
+		"ECDHE-ECDSA-AES128-GCM-SHA256",
+		"ECDHE-RSA-AES128-GCM-SHA256",
+		"ECDHE-ECDSA-AES256-GCM-SHA384",
+		"ECDHE-RSA-AES256-GCM-SHA384",
 	}
 
 	apiserver.Spec.TLSSecurityProfile = &configv1.TLSSecurityProfile{
 		Type: configv1.TLSProfileCustomType,
 		Custom: &configv1.CustomTLSProfile{
 			TLSProfileSpec: configv1.TLSProfileSpec{
-				MinTLSVersion: minTLSVersion,
-				Groups:        tlsGroups,
+				MinTLSVersion: configv1.VersionTLS12,
 				Ciphers:       ciphers,
+				Groups:        tlsGroups,
 			},
 		},
 	}
@@ -492,52 +486,13 @@ func ConfigureAPIServerWithTLSGroups(c *testclient.ClientSet, groups []string, m
 
 	err = c.Update(ctx, apiserver)
 	if err != nil {
-		return fmt.Errorf("failed to update apiserver: %w", err)
+		return false, fmt.Errorf("failed to update apiserver: %w", err)
 	}
 
 	// Always wait for cluster to stabilize after TLS configuration changes
 	log.Println("Waiting for cluster to stabilize after TLS configuration")
 	log.Println("  This may take time if MCP rollout is triggered")
-	return waitForClusterStabilization(ctx, c, true, true)
-}
-
-// VerifyAPIServerTLSGroups verifies that the APIServer has the expected TLS groups configured.
-func VerifyAPIServerTLSGroups(c *testclient.ClientSet, expectedGroups []string) error {
-	ctx := context.Background()
-
-	log.Printf("Verifying APIServer TLS groups configuration")
-
-	apiserver := &configv1.APIServer{}
-	err := c.Get(ctx, types.NamespacedName{Name: "cluster"}, apiserver)
-	if err != nil {
-		return fmt.Errorf("failed to get APIServer: %w", err)
-	}
-
-	if apiserver.Spec.TLSSecurityProfile == nil {
-		return fmt.Errorf("APIServer TLS security profile is nil")
-	}
-
-	if apiserver.Spec.TLSSecurityProfile.Type != configv1.TLSProfileCustomType {
-		return fmt.Errorf("APIServer TLS profile type is not Custom: %s", apiserver.Spec.TLSSecurityProfile.Type)
-	}
-
-	if apiserver.Spec.TLSSecurityProfile.Custom == nil {
-		return fmt.Errorf("APIServer Custom TLS profile is nil")
-	}
-
-	actualGroups := apiserver.Spec.TLSSecurityProfile.Custom.Groups
-	if len(actualGroups) != len(expectedGroups) {
-		return fmt.Errorf("APIServer TLS groups count mismatch: actual=%d, expected=%d", len(actualGroups), len(expectedGroups))
-	}
-
-	for i, expected := range expectedGroups {
-		if string(actualGroups[i]) != expected {
-			return fmt.Errorf("APIServer TLS group mismatch at index %d: actual=%s, expected=%s", i, actualGroups[i], expected)
-		}
-	}
-
-	log.Printf("  TLS groups verified: %v", actualGroups)
-	return nil
+	return true, waitForClusterStabilization(ctx, c, true, true)
 }
 
 // selectWorkerNode selects the first available worker node.
@@ -732,136 +687,6 @@ func execOpensslOnNode(c *testclient.ClientSet, nodeName, groups string) (string
 	}
 
 	return fullOutput, nil
-}
-
-// VerifyAllTLSGroupsOnWorkerNode tests that all configured TLS groups work correctly.
-// This is a comprehensive test to validate that when all groups are enabled, each one can successfully handshake.
-func VerifyAllTLSGroupsOnWorkerNode(c *testclient.ClientSet, namespace string) error {
-	log.Println("Testing comprehensive TLS groups compliance on worker node")
-
-	workerNode, err := selectWorkerNode(c)
-	if err != nil {
-		return err
-	}
-	log.Printf("  Testing on worker node: %s", workerNode)
-
-	// Test cases for all supported TLS groups
-	// Map of OpenSSL group name to expected negotiated key name
-	testCases := []struct {
-		name            string
-		opensslGroup    string
-		expectedKeyword string // What to look for in the output to verify success
-		description     string
-	}{
-		{
-			name:            "X25519",
-			opensslGroup:    "X25519",
-			expectedKeyword: "X25519",
-			description:     "X25519 curve",
-		},
-		{
-			name:            "secp256r1",
-			opensslGroup:    "secp256r1",
-			expectedKeyword: "prime256v1",
-			description:     "secp256r1 (prime256v1) curve",
-		},
-		{
-			name:            "secp384r1",
-			opensslGroup:    "secp384r1",
-			expectedKeyword: "secp384r1",
-			description:     "secp384r1 curve",
-		},
-		{
-			name:            "secp521r1",
-			opensslGroup:    "secp521r1",
-			expectedKeyword: "secp521r1",
-			description:     "secp521r1 curve",
-		},
-		// Post-quantum hybrid groups - these may not be supported by all OpenSSL versions
-		// Test them, but don't fail the entire suite if OpenSSL doesn't recognize them
-		{
-			name:            "X25519MLKEM768",
-			opensslGroup:    "X25519MLKEM768",
-			expectedKeyword: "X25519MLKEM768",
-			description:     "X25519MLKEM768 post-quantum hybrid curve",
-		},
-		{
-			name:            "SecP256r1MLKEM768",
-			opensslGroup:    "SecP256r1MLKEM768",
-			expectedKeyword: "SecP256r1MLKEM768",
-			description:     "SecP256r1MLKEM768 post-quantum hybrid curve",
-		},
-		{
-			name:            "SecP384r1MLKEM1024",
-			opensslGroup:    "SecP384r1MLKEM1024",
-			expectedKeyword: "SecP384r1MLKEM1024",
-			description:     "SecP384r1MLKEM1024 post-quantum hybrid curve",
-		},
-	}
-
-	allPassed := true
-	var failedTests []string
-	var skippedPQTests []string
-
-	for i, tc := range testCases {
-		log.Printf("  Test %d: Testing TLS 1.3 with %s", i+1, tc.description)
-		output, err := execOpensslOnNode(c, workerNode, tc.opensslGroup)
-
-		// Check if this is a post-quantum group that OpenSSL doesn't recognize
-		isPQGroup := strings.Contains(tc.name, "MLKEM")
-		if isPQGroup && err != nil {
-			if strings.Contains(output, "unknown option") ||
-				strings.Contains(output, "invalid") ||
-				strings.Contains(output, "unrecognized") {
-				log.Printf("  ⊘ Test %d skipped: %s - OpenSSL doesn't support this post-quantum group", i+1, tc.name)
-				skippedPQTests = append(skippedPQTests, tc.name)
-				continue
-			}
-		}
-
-		if err != nil {
-			// Check if it's just an OpenSSL error but connection was established
-			if !strings.Contains(output, "CONNECTION ESTABLISHED") {
-				log.Printf("  ✗ Test %d failed: %s handshake failed: %v", i+1, tc.name, err)
-				log.Printf("    Output: %s", output)
-				allPassed = false
-				failedTests = append(failedTests, fmt.Sprintf("%s (handshake failed)", tc.name))
-				continue
-			}
-		}
-
-		// Verify connection was established
-		if !strings.Contains(output, "CONNECTION ESTABLISHED") {
-			log.Printf("  ✗ Test %d failed: %s - no connection established", i+1, tc.name)
-			log.Printf("    Output: %s", output)
-			allPassed = false
-			failedTests = append(failedTests, fmt.Sprintf("%s (no connection)", tc.name))
-			continue
-		}
-
-		// Verify the expected key was negotiated (for traditional ECDH groups)
-		// Some groups like X25519 may show as "X25519" or "X25519, 253 bits"
-		// P-256/384/521 show as "ECDH, prime256v1, 256 bits" etc.
-		if !strings.Contains(output, tc.expectedKeyword) {
-			log.Printf("  ⚠ Test %d warning: %s - connection succeeded but expected keyword '%s' not found", i+1, tc.name, tc.expectedKeyword)
-			log.Printf("    Output: %s", output)
-			// Don't fail the test - connection succeeded, which is the main goal
-		}
-
-		log.Printf("  ✓ Test %d passed: %s handshake succeeded", i+1, tc.name)
-	}
-
-	if !allPassed {
-		return fmt.Errorf("some TLS group tests failed: %s", strings.Join(failedTests, ", "))
-	}
-
-	if len(skippedPQTests) > 0 {
-		log.Printf("All testable TLS groups compliance tests passed (skipped %d post-quantum groups unsupported by OpenSSL: %s)",
-			len(skippedPQTests), strings.Join(skippedPQTests, ", "))
-	} else {
-		log.Println("All comprehensive TLS groups compliance tests passed (including post-quantum groups)")
-	}
-	return nil
 }
 
 func determineTLSTestBehavior(apiserver *configv1.APIServer) (expectTLS12Reject bool, description string) {
@@ -1082,46 +907,6 @@ func RestartDaemonPods(c client.Client, namespace, labelSelector string) error {
 
 		if allNewAndReady {
 			log.Printf("All %d new daemon pods are ready", len(newPodList.Items))
-			return true, nil
-		}
-		return false, nil
-	})
-}
-
-func WaitForDaemonPodsReady(c client.Client, namespace, labelSelector string, timeout time.Duration) error {
-	log.Printf("Waiting for daemon pods with selector %s to be ready in namespace %s", labelSelector, namespace)
-
-	ctx := context.Background()
-	return wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		podList := &corev1.PodList{}
-		err := c.List(ctx, podList, client.InNamespace(namespace), client.MatchingLabels(parseLabelSelector(labelSelector)))
-		if err != nil {
-			log.Printf("Error listing pods: %v", err)
-			return false, nil
-		}
-		pods := podList.Items
-
-		if len(pods) == 0 {
-			log.Printf("No pods found yet, waiting...")
-			return false, nil
-		}
-
-		allReady := true
-		for _, pod := range pods {
-			if pod.Status.Phase != corev1.PodRunning {
-				log.Printf("Pod %s is not Running (phase: %s), waiting...", pod.Name, pod.Status.Phase)
-				allReady = false
-				continue
-			}
-
-			if !podutil.IsPodReady(&pod) {
-				log.Printf("Pod %s is not Ready, waiting...", pod.Name)
-				allReady = false
-			}
-		}
-
-		if allReady {
-			log.Printf("All %d daemon pods are ready", len(pods))
 			return true, nil
 		}
 		return false, nil
