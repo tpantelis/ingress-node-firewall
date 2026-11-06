@@ -563,13 +563,11 @@ func VerifyTLSGroupsOnWorkerNode(ctx context.Context, c *testclient.ClientSet, a
 }
 
 // execOpensslOnNode executes openssl s_client on a node using a debug pod.
-// This creates a privileged debug pod on the node and runs the openssl command in it.
+// This creates a debug pod with host network access to connect to the daemon metrics endpoint.
 func execOpensslOnNode(ctx context.Context, c *testclient.ClientSet, nodeName, groups string) (string, error) {
 	// Create unique debug pod name
 	debugPodName := fmt.Sprintf("tls-groups-debug-%d", time.Now().UnixNano())
 
-	// Create a privileged pod that has access to the host filesystem
-	privileged := true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      debugPodName,
@@ -577,33 +575,13 @@ func execOpensslOnNode(ctx context.Context, c *testclient.ClientSet, nodeName, g
 		},
 		Spec: corev1.PodSpec{
 			NodeName:      nodeName,
-			HostNetwork:   true,
-			HostPID:       true,
+			HostNetwork:   true, // Needed to connect to daemon on 127.0.0.1:9301
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{
 				{
 					Name:    "debug",
 					Image:   "registry.redhat.io/rhel8/support-tools:latest",
 					Command: []string{"/bin/bash", "-c", "sleep 600"},
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: &privileged,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name:      "host-root",
-							MountPath: "/host",
-						},
-					},
-				},
-			},
-			Volumes: []corev1.Volume{
-				{
-					Name: "host-root",
-					VolumeSource: corev1.VolumeSource{
-						HostPath: &corev1.HostPathVolumeSource{
-							Path: "/",
-						},
-					},
 				},
 			},
 		},
@@ -656,14 +634,13 @@ func execOpensslOnNode(ctx context.Context, c *testclient.ClientSet, nodeName, g
 
 	log.Printf("    Debug pod is ready")
 
-	// Execute openssl command using chroot to access host binaries
-	// We need to use sh -c because we need the pipe and proper input handling
-	opensslCmd := fmt.Sprintf("echo Q | chroot /host openssl s_client -connect 127.0.0.1:9301 -tls1_3 -groups %s -brief 2>&1", groups)
+	// Execute openssl command to test TLS handshake
+	opensslCmd := fmt.Sprintf("echo Q | openssl s_client -connect 127.0.0.1:9301 -tls1_3 -groups %s -brief 2>&1", groups)
 	cmd := []string{
 		"sh", "-c", opensslCmd,
 	}
 
-	log.Printf("    Executing: echo Q | chroot /host openssl s_client -connect 127.0.0.1:9301 -tls1_3 -groups %s -brief", groups)
+	log.Printf("    Executing: echo Q | openssl s_client -connect 127.0.0.1:9301 -tls1_3 -groups %s -brief", groups)
 
 	stdout, stderr, execErr := executil.RunExecCommand(c, readyPod, cmd...)
 	fullOutput := stdout + stderr
@@ -676,7 +653,7 @@ func execOpensslOnNode(ctx context.Context, c *testclient.ClientSet, nodeName, g
 
 	if execErr != nil {
 		// For rejected handshakes, openssl returns an error, so we return both output and error
-		// This is expected for test 3 (secp384r1 should fail)
+		// This is expected when testing the rejected group
 		log.Printf("    Exec error: %v", execErr)
 		return fullOutput, execErr
 	}
