@@ -1370,7 +1370,7 @@ var _ = Describe("Ingress Node Firewall", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 
 			By("Testing TLS handshakes on worker node")
-			err = tls.VerifyTLSGroupsOnWorkerNode(testclient.Client, OperatorNameSpace)
+			err = tls.VerifyTLSGroupsOnWorkerNode(ctx, testclient.Client, groups, configv1.TLSGroupSecP384r1)
 			Expect(err).NotTo(HaveOccurred(), "TLS group preferences verification failed")
 		})
 	})

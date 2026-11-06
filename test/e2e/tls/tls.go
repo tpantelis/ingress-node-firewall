@@ -496,8 +496,7 @@ func ConfigureAPIServerWithTLSGroups(ctx context.Context, c *testclient.ClientSe
 }
 
 // selectWorkerNode selects the first available worker node.
-func selectWorkerNode(c *testclient.ClientSet) (string, error) {
-	ctx := context.Background()
+func selectWorkerNode(ctx context.Context, c *testclient.ClientSet) (string, error) {
 	nodeList := &corev1.NodeList{}
 	err := c.List(ctx, nodeList, client.MatchingLabels{"node-role.kubernetes.io/worker": ""})
 	if err != nil {
@@ -512,54 +511,52 @@ func selectWorkerNode(c *testclient.ClientSet) (string, error) {
 }
 
 // VerifyTLSGroupsOnWorkerNode tests TLS handshake behavior on a worker node using openssl s_client.
-// It verifies that only the configured curves are accepted.
-func VerifyTLSGroupsOnWorkerNode(c *testclient.ClientSet, namespace string) error {
-	log.Println("Testing TLS groups compliance on worker node")
+// It verifies that the configured curves are accepted and a rejected curve fails.
+func VerifyTLSGroupsOnWorkerNode(ctx context.Context, c *testclient.ClientSet, allowedGroups []configv1.TLSGroup, rejectedGroup configv1.TLSGroup) error {
+	log.Printf("Testing TLS groups compliance on worker node (allowed: %v, rejected: %s)", allowedGroups, rejectedGroup)
 
-	workerNode, err := selectWorkerNode(c)
+	workerNode, err := selectWorkerNode(ctx, c)
 	if err != nil {
 		return err
 	}
 	log.Printf("  Testing on worker node: %s", workerNode)
 
-	// Test 1: secp256r1 should succeed (it's in the configured groups)
-	log.Println("  Test 1: TLS 1.3 with secp256r1 curve (should succeed)")
-	output, err := execOpensslOnNode(c, workerNode, "secp256r1")
-	if err != nil {
-		return fmt.Errorf("test 1 failed: %w\nOutput: %s", err, output)
+	// Helper to get expected output name for a group
+	// secp256r1 is special - openssl outputs "prime256v1", all others use the group name
+	getExpectedOutputName := func(group configv1.TLSGroup) string {
+		if group == configv1.TLSGroupSecP256r1 {
+			return "prime256v1"
+		}
+		return string(group)
 	}
-	if !strings.Contains(output, "CONNECTION ESTABLISHED") {
-		return fmt.Errorf("test 1: expected connection established, but handshake failed\nOutput: %s", output)
-	}
-	if !strings.Contains(output, "prime256v1") {
-		return fmt.Errorf("test 1: expected negotiated key prime256v1, got different key\nOutput: %s", output)
-	}
-	log.Println("  ✓ Test 1 passed: secp256r1 handshake succeeded with prime256v1")
 
-	// Test 2: secp384r1:secp256r1 should succeed and use secp256r1
-	log.Println("  Test 2: TLS 1.3 with secp384r1:secp256r1 curves (should succeed with secp256r1)")
-	output, err = execOpensslOnNode(c, workerNode, "secp384r1:secp256r1")
-	if err != nil {
-		return fmt.Errorf("test 2 failed: %w\nOutput: %s", err, output)
+	// Test each allowed group individually
+	for _, group := range allowedGroups {
+		log.Printf("  TLS 1.3 with %s curve (should succeed)", group)
+		output, err := execOpensslOnNode(ctx, c, workerNode, string(group))
+		if err != nil {
+			return fmt.Errorf("%s handshake failed: %w\nOutput: %s", group, err, output)
+		}
+		if !strings.Contains(output, "CONNECTION ESTABLISHED") {
+			return fmt.Errorf("%s: expected connection established, but handshake failed\nOutput: %s", group, output)
+		}
+		expectedOutputName := getExpectedOutputName(group)
+		if !strings.Contains(output, expectedOutputName) {
+			return fmt.Errorf("%s: expected negotiated key %s, got different key\nOutput: %s", group, expectedOutputName, output)
+		}
+		log.Printf("  ✓ %s handshake succeeded with %s", group, expectedOutputName)
 	}
-	if !strings.Contains(output, "CONNECTION ESTABLISHED") {
-		return fmt.Errorf("test 2: expected connection established, but handshake failed\nOutput: %s", output)
-	}
-	if !strings.Contains(output, "prime256v1") {
-		return fmt.Errorf("test 2: expected negotiated key prime256v1 (secp256r1), got different key\nOutput: %s", output)
-	}
-	log.Println("  ✓ Test 2 passed: secp384r1:secp256r1 handshake succeeded using secp256r1")
 
-	// Test 3: secp384r1 should fail (not in configured groups)
-	log.Println("  Test 3: TLS 1.3 with secp384r1 curve (should fail)")
-	output, err = execOpensslOnNode(c, workerNode, "secp384r1")
+	// Test rejected group - should fail
+	log.Printf("  TLS 1.3 with %s curve (should fail)", rejectedGroup)
+	output, err := execOpensslOnNode(ctx, c, workerNode, string(rejectedGroup))
 	if err == nil {
-		return fmt.Errorf("test 3: expected handshake to fail, but it succeeded\nOutput: %s", output)
+		return fmt.Errorf("%s: expected handshake to fail, but it succeeded\nOutput: %s", rejectedGroup, output)
 	}
 	if !strings.Contains(output, "handshake failure") && !strings.Contains(output, "alert") && !strings.Contains(output, "error") {
-		return fmt.Errorf("test 3: expected handshake failure, but got unexpected output\nOutput: %s", output)
+		return fmt.Errorf("%s: expected handshake failure, but got unexpected output\nOutput: %s", rejectedGroup, output)
 	}
-	log.Println("  ✓ Test 3 passed: secp384r1 handshake correctly rejected")
+	log.Printf("  ✓ %s handshake correctly rejected", rejectedGroup)
 
 	log.Println("All TLS groups compliance tests passed")
 	return nil
@@ -567,9 +564,7 @@ func VerifyTLSGroupsOnWorkerNode(c *testclient.ClientSet, namespace string) erro
 
 // execOpensslOnNode executes openssl s_client on a node using a debug pod.
 // This creates a privileged debug pod on the node and runs the openssl command in it.
-func execOpensslOnNode(c *testclient.ClientSet, nodeName, groups string) (string, error) {
-	ctx := context.Background()
-
+func execOpensslOnNode(ctx context.Context, c *testclient.ClientSet, nodeName, groups string) (string, error) {
 	// Create unique debug pod name
 	debugPodName := fmt.Sprintf("tls-groups-debug-%d", time.Now().UnixNano())
 
